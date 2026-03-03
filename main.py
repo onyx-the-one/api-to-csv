@@ -1,141 +1,98 @@
-#!/usr/bin/env python3
 import argparse
 import csv
 import json
+import time
 import requests
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Parse logs and API data into a structured CSV export.",
+        description="Periodically request data from an API and log results to a CSV file.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
+    parser.add_argument("-u", "--url", required=True, help="API endpoint URL to query.")
     parser.add_argument(
-        "-l", "--log",
-        type=Path,
-        required=True,
-        help="Path to the log file (text or JSON lines)."
+        "-i", "--interval", type=float, default=60,
+        help="Time between requests in seconds."
     )
-
     parser.add_argument(
-        "-u", "--url",
-        type=str,
-        required=True,
-        help="API endpoint returning JSON data."
+        "-o", "--output", type=Path, default=Path("api_log.csv"),
+        help="Output CSV file."
     )
-
     parser.add_argument(
-        "-o", "--output",
-        type=Path,
-        default=Path("output.csv"),
-        help="Output CSV file path."
+        "--method", choices=["GET", "POST"], default="GET",
+        help="HTTP method for requests."
     )
-
     parser.add_argument(
-        "--method",
-        type=str,
-        choices=["GET", "POST"],
-        default="GET",
-        help="HTTP method for API request."
+        "--params", type=json.loads, default={},
+        help="Optional JSON parameters for GET or POST requests."
     )
-
     parser.add_argument(
-        "--params",
-        type=json.loads,
-        default={},
-        help="Optional JSON string for query parameters or POST body."
+        "--flatten", action="store_true",
+        help="Flatten top-level JSON keys into CSV columns (if dict)."
     )
-
     parser.add_argument(
-        "--delimiter",
-        type=str,
-        default=",",
-        help="CSV delimiter character."
-    )
-
-    parser.add_argument(
-        "--timestamp",
-        action="store_true",
-        help="Add timestamp column to output CSV."
-    )
-
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Enable detailed output for debugging."
+        "--verbose", action="store_true", help="Print debug output."
     )
 
     return parser.parse_args()
 
 
-def read_logs(file_path):
-    """Read log file (plain text or JSON lines)."""
-    entries = []
-    with open(file_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                entries.append({"log": line})
-    return entries
+def fetch_data(url, method, params, verbose=False):
+    """Send request and return JSON or text response."""
+    try:
+        if verbose:
+            print(f"Requesting {method} {url} with {params}")
+        if method == "GET":
+            r = requests.get(url, params=params)
+        else:
+            r = requests.post(url, json=params)
+        r.raise_for_status()
+
+        try:
+            return r.json()
+        except json.JSONDecodeError:
+            return {"response": r.text}
+    except Exception as e:
+        if verbose:
+            print(f"Request failed: {e}")
+        return {"error": str(e)}
 
 
-def fetch_api_data(url, method, params, verbose=False):
-    """Fetch data from API, supporting GET or POST with optional params."""
-    if verbose:
-        print(f"Requesting {method} {url} with params: {params}")
+def log_to_csv(output_path, data, flatten=False, verbose=False):
+    """Append one row to CSV file."""
+    timestamp = datetime.now().isoformat()
 
-    if method == "GET":
-        r = requests.get(url, params=params)
+    if flatten and isinstance(data, dict):
+        row = {"timestamp": timestamp, **data}
     else:
-        r = requests.post(url, json=params)
+        row = {"timestamp": timestamp, "data": json.dumps(data, ensure_ascii=False)}
 
-    r.raise_for_status()
-    return r.json()
+    file_exists = output_path.exists()
 
-
-def merge_data(logs, api_data, add_timestamp=False):
-    """Merge log and API data into a unified list for CSV writing."""
-    combined = []
-    for i, log_entry in enumerate(logs):
-        api_entry = api_data[i] if i < len(api_data) else {}
-        merged = {**log_entry, **api_entry}
-        if add_timestamp:
-            merged["timestamp"] = datetime.now().isoformat()
-        combined.append(merged)
-    return combined
-
-
-def write_csv(data, output_path, delimiter, verbose=False):
-    """Write combined data to CSV."""
-    if not data:
-        raise ValueError("No data to write.")
-
-    keys = sorted(set().union(*(d.keys() for d in data)))
-    with open(output_path, "w", newline="", encoding="utf-8") as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=keys, delimiter=delimiter)
-        writer.writeheader()
-        writer.writerows(data)
+    with open(output_path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=row.keys())
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
 
     if verbose:
-        print(f"CSV successfully written to {output_path}")
+        print(f"[{timestamp}] Logged to {output_path}")
 
 
 def main():
     args = parse_args()
 
-    if args.verbose:
-        print(f"Reading logs from {args.log}")
-    logs = read_logs(args.log)
+    print(f"Starting API logger for {args.url}")
+    print(f"Interval: {args.interval}s, output: {args.output}\n")
 
-    api_data = fetch_api_data(args.url, args.method, args.params, args.verbose)
-
-    combined = merge_data(logs, api_data, args.timestamp)
-    write_csv(combined, args.output, args.delimiter, args.verbose)
+    while True:
+        data = fetch_data(args.url, args.method, args.params, args.verbose)
+        log_to_csv(args.output, data, args.flatten, args.verbose)
+        time.sleep(args.interval)
 
 
 if __name__ == "__main__":
